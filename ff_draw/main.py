@@ -9,12 +9,19 @@ import threading
 
 import aiohttp.web
 import glm
-import requests
 from fpt4.utils.sqpack import SqPack
+
+try:
+    import aiohttp_cors
+except ImportError:
+    use_aiohttp_cors = False
+else:
+    use_aiohttp_cors = True
 
 from . import gui, omen, mem, func_parser, plugins, update
 
 cfg_path = pathlib.Path(os.environ['ExcPath']) / 'config.json'
+default_cn = bool(os.environ.get('DefaultCn'))
 
 
 class FFDraw:
@@ -24,15 +31,19 @@ class FFDraw:
     def __init__(self, pid: int):
         self.config = json.loads(cfg_path.read_text('utf-8')) if cfg_path.exists() else {}
         self.rpc_password = self.config.setdefault('rpc_password', '')
-        self.path_encoding = self.config.setdefault('path_encoding', sys.getfilesystemencoding())
+        if default_cn:
+            self.path_encoding = self.config.setdefault('path_encoding', 'gbk')
+        else:
+            self.path_encoding = self.config.setdefault('path_encoding', sys.getfilesystemencoding())
         web_server_cfg = self.config.setdefault('web_server', {})
         self.http_host = web_server_cfg.setdefault('host', '127.0.0.1')
         self.http_port = web_server_cfg.setdefault('port', 8001)
+        self.enable_cors = web_server_cfg.setdefault('enable_cors', False) and use_aiohttp_cors
 
         self.logger.debug(f'set path_encoding:%s', self.path_encoding)
 
         threading.Thread(target=update.check, args=(
-            self.config.setdefault('update_source', 'github'),
+            self.config.setdefault('update_source', ('fastgit' if default_cn else 'github')),
         )).start()
 
         self.mem = mem.XivMem(self, pid)
@@ -112,10 +123,26 @@ class FFDraw:
             return aiohttp.web.json_response({'success': True, 'res': self.parser.parse_func(json.loads(line))})
         except Exception as e:
             self.logger.warning('exception in processing rpc request line:' + line, exc_info=e)
-            return aiohttp.web.json_response({'success': False})
+            return aiohttp.web.json_response({'success': False, 'msg': 'server exception'})
+
+    async def rpc_handler_required_password(self, request):
+        return aiohttp.web.json_response({'success': False, 'msg': 'required password'})
 
     def start_http_server(self, host=None, port=None):
         app = aiohttp.web.Application()
-        rpc_path = ('/rpc/' + self.rpc_password) if self.rpc_password else '/rpc'
-        app.add_routes([aiohttp.web.post(rpc_path, self.rpc_handler)])
+        if self.rpc_password:
+            app.router.add_post('/rpc/' + self.rpc_password, self.rpc_handler)
+            app.router.add_post('/rpc', self.rpc_handler_required_password)
+        else:
+            app.router.add_post('/rpc', self.rpc_handler)
+        if self.enable_cors:
+            cors = aiohttp_cors.setup(app, defaults={
+                "*": aiohttp_cors.ResourceOptions(
+                    allow_credentials=True,
+                    expose_headers="*",
+                    allow_headers="*",
+                )
+            })
+            for route in list(app.router.routes()):
+                cors.add(route)
         aiohttp.web.run_app(app, host=host or self.http_host, port=port or self.http_port)

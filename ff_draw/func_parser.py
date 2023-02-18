@@ -1,4 +1,5 @@
 import logging
+import math
 import typing
 from functools import cache
 
@@ -34,6 +35,7 @@ def actor_distance_func(actor):
     return lambda a: glm.distance(src_pos, a.pos)
 
 
+# TODO: to jump map
 def make_value(parser: 'FuncParser', value, res: ResMap, args: dict[str, typing.Any]):
     if isinstance(value, list):
         value_args = (''.join(make_value(parser, v, res, args) + ',' for v in value))
@@ -41,6 +43,16 @@ def make_value(parser: 'FuncParser', value, res: ResMap, args: dict[str, typing.
     if not isinstance(value, dict):
         return '(' + repr(value) + ')'
     match value.get('key'):
+        case 'pi':
+            val = ('*' + make_value(parser, val, res, args)) if (val := value.get("val", 1)) != 1 else ''
+            return "(math.pi" + val + ")"
+        case 'rad_deg':
+            if 'rad' in value:
+                return f'(math.degrees({make_value(parser, value["rad"], res, args)}))'
+            elif 'deg' in value:
+                return f'(math.radians({make_value(parser, value["deg"], res, args)}))'
+            else:
+                return '(0)'
         case 'now':
             return "(" + res.add_res(parser.parse_value(value.get('value'), args)) + ")"
         case 'arg':
@@ -49,6 +61,8 @@ def make_value(parser: 'FuncParser', value, res: ResMap, args: dict[str, typing.
             return '(omen.remaining_time)'
         case 'is_hit':
             return f'(int(omen.is_hit({make_value(parser, value.get("pos"), res, args)})))'
+        case 'count_hit_actor':
+            return f'(sum(int(omen.is_hit(_a.pos)) for _a in (main.mem.actor_table.get_actor_by_id(_i) for _i in ({make_value(parser, value.get("ids"), res, args)})) if _a))'
         case 'progress':
             return "(omen.progress)"
         case 'destroy_omen':
@@ -116,6 +130,8 @@ def make_value(parser: 'FuncParser', value, res: ResMap, args: dict[str, typing.
             return "(min(" + (",".join(make_value(parser, v, res, args) for v in value.get('values', []))) + "))"
         case 'max':
             return "(max(" + (",".join(make_value(parser, v, res, args) for v in value.get('values', []))) + "))"
+        case 'string_format':
+            return f"({make_value(parser, value.get('format', []), res, args)}.format({','.join(make_value(parser, v, res, args) for v in value.get('args', []))}))"
         case 'fan':
             return f"((0x50000|{make_value(parser, value.get('deg', 0), res, args)}),({make_value(parser, value.get('range', 0), res, args)},)*3)"
         case 'circle':
@@ -164,7 +180,7 @@ class FuncParser:
         self.action_sheet = main.sq_pack.sheets.action_sheet
         self.parse_name_space = {
             'glm': glm, 'main': self.main, 'safe_lazy': safe_lazy,
-            'actor_distance': actor_distance_func, 'action_shape_scale': self.action_shape_scale
+            'actor_distance': actor_distance_func, 'action_shape_scale': self.action_shape_scale, 'math': math
         }
         compile_config = self.main.config.setdefault('compile', {})
         self.print_compile = compile_config.setdefault('print_debug', {}).setdefault('enable', False)
@@ -201,6 +217,22 @@ class FuncParser:
                 return self.parse_func(command.get('func'), args | {k: self.parse_value(v, args) for k, v in command.get('args', {}).items()})
             case 'foreach':
                 return [self.parse_func(command.get('func'), args | {command.get('name', 'v'): v}) for v in self.parse_value(command.get('values'), args)]
+            case 'add_line':
+                width = self.parse_value_lambda(command.get('width',3), args)
+                color = self.parse_value_lambda(command.get('color'), args)
+                src = self.parse_value_lambda(command.get('src'), args)
+                dst = self.parse_value_lambda(command.get('dst'), args)
+                return omen_module.Line(
+                    main=self.main,
+                    src=src, dst=dst,
+                    line_color=color,
+                    line_width=width,
+                    label=self.parse_value_lambda(command.get('label', ''), args),
+                    label_color=self.parse_value_lambda(command.get('label_color', [0, 0, 0]), args),
+                    label_scale=self.parse_value_lambda(command.get('label_scale', 1), args),
+                    label_at=self.parse_value_lambda(command.get('label_at', 1), args),
+                    duration=command.get('duration', 0),
+                ).oid
             case 'add_omen':
                 if 'shape_scale' in command:
                     shape = scale = None
