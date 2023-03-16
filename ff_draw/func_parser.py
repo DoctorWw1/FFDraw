@@ -66,7 +66,7 @@ def make_value(parser: 'FuncParser', value, res: ResMap, args: dict[str, typing.
         case 'progress':
             return "(omen.progress)"
         case 'destroy_omen':
-            return "(setattr(omen,'working',False))"
+            return "(omen.timeout())"
         case 'eval':
             code_key = res.add_eval_code(value.get("code"))
             value_args = "{'omen':omen,'glm':glm," + ','.join(f'{repr(k)}:{make_value(parser, v, res, args)}' for k, v in value.get('args', {}).items()) + '}'
@@ -182,9 +182,9 @@ class FuncParser:
             'glm': glm, 'main': self.main, 'safe_lazy': safe_lazy,
             'actor_distance': actor_distance_func, 'action_shape_scale': self.action_shape_scale, 'math': math
         }
-        compile_config = self.main.config.setdefault('compile', {})
-        self.print_compile = compile_config.setdefault('print_debug', {}).setdefault('enable', False)
-        self.enable_eval = compile_config.setdefault('enable_eval', False)
+        self.compile_config = self.main.config.setdefault('compile', {})
+        self.print_compile = self.compile_config.setdefault('print_debug', {}).setdefault('enable', False)
+        self.enable_eval = self.compile_config.setdefault('enable_eval', False)
         if self.enable_eval and not self.main.rpc_password:
             self.logger.warning(r'enable_eval is set as true but there is no rpc password, please set a rpc password to enable eval function')
             self.enable_eval = False
@@ -218,7 +218,7 @@ class FuncParser:
             case 'foreach':
                 return [self.parse_func(command.get('func'), args | {command.get('name', 'v'): v}) for v in self.parse_value(command.get('values'), args)]
             case 'add_line':
-                width = self.parse_value_lambda(command.get('width',3), args)
+                width = self.parse_value_lambda(command.get('width', 3), args)
                 color = self.parse_value_lambda(command.get('color'), args)
                 src = self.parse_value_lambda(command.get('src'), args)
                 dst = self.parse_value_lambda(command.get('dst'), args)
@@ -256,6 +256,7 @@ class FuncParser:
                     facing=self.parse_value_lambda(command.get('facing'), args),
                     surface_color=surface_color,
                     line_color=line_color,
+                    line_width=self.parse_value_lambda(command.get('line_width', 3), args),
                     surface_line_color=surface_line,
                     label=self.parse_value_lambda(command.get('label', ''), args),
                     label_color=self.parse_value_lambda(command.get('label_color', [0, 0, 0]), args),
@@ -270,11 +271,11 @@ class FuncParser:
                     cnt = 0
                     while omens:
                         if _omen := omens.pop(next(iter(omens.keys()), None)):
-                            _omen.destroy()
+                            _omen.timeout()
                             cnt += 1
                     return cnt
                 elif _omen := self.main.omens.get(oid):
-                    _omen.destroy()
+                    _omen.timeout()
                     return 1
                 return 0
             case unk:

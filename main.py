@@ -1,4 +1,5 @@
 import logging
+import multiprocessing
 import os
 import pathlib
 import sys
@@ -8,17 +9,20 @@ os.environ['ExcPath'] = str(exc_path)
 
 from nylib.logging import install
 from nylib.utils.win32.process import enable_privilege, pid_by_executable, is_admin, runas
-from ff_draw.main import FFDraw
 
 
 def main():
-    install()
+    multiprocessing.freeze_support()
     try:
+        from ff_draw.main import FFDraw
+        install()
+        logging.debug(f'current Pid:%s')
         if not is_admin():
             runas()
             exit()
         enable_privilege()
         instance = FFDraw(next(pid_by_executable(b'ffxiv_dx11.exe')))
+        instance.start_sniffer()
         instance.start_gui_thread()
         instance.start_http_server()
     except Exception as e:
