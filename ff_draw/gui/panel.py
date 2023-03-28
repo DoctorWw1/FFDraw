@@ -45,7 +45,9 @@ class FFDPanel:
 
         if me := mem.actor_table.me:
             imgui.text(f'me: {me.name}#{me.id:#x}')
-            if (tid := mem.territory_type) != self.cached_tid:
+            tinfo = mem.territory_info
+            tid = tinfo.territory_id
+            if tid != self.cached_tid:
                 self.cached_tid = tid
                 try:
                     territory = self.main.sq_pack.sheets.territory_type_sheet[tid]
@@ -53,10 +55,34 @@ class FFDPanel:
                     self.territory = 'N/A'
                 else:
                     self.territory = f'{territory.region.text_sgl}-{territory.sub_region.text_sgl}-{territory.area.text_sgl}'
-            imgui.text(f'territory: {self.territory}#{tid}')
+            imgui.text(f'territory: {self.territory}')
+            imgui.text(f'[Tid: {tid}][Layer: {tinfo.layer_id}][Weather: {tinfo.weather_id}/{tinfo.weather_is_content}]')
             imgui.text(f'pos: {me.pos}#{me.facing / math.pi:.2f}pi')
         else:
             imgui.text(f'me: N/A')
+
+        if imgui.tree_node('EventModule'):
+            if imgui.tree_node('ContentInfo'):
+                try:
+                    cinfo = mem.event_module.content_info
+                    imgui.text(f'handler_id: {cinfo.handler_id:#X}')
+                    imgui.text(f'content_id: {cinfo.content_id:#X}')
+                    imgui.text(f'title: {cinfo.title}')
+                    imgui.text(f'text1: {cinfo.text1}')
+                    imgui.text(f'text2: {cinfo.text2}')
+                    imgui.text('todo_list')
+                    if imgui.tree_node('Todo List'):
+                        try:
+                            for todo in cinfo.todo_list:
+                                if not todo.is_valid: break
+                                imgui.text(f'[{todo.is_finished}]{todo.desc}')
+                        except Exception as e:
+                            imgui.text('N/A - ' + str(e))
+                        imgui.tree_pop()
+                except Exception as e:
+                    imgui.text('N/A - ' + str(e))
+                imgui.tree_pop()
+            imgui.tree_pop()
 
         imgui.text('plugins')
 
