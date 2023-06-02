@@ -17,7 +17,7 @@ import imgui
 import OpenGL.GL as gl
 from win32gui import GetForegroundWindow
 
-from . import window, view, text, panel as m_panel
+from . import window, view, text, panel as m_panel, default_style
 from .utils import common_shader, models
 
 if typing.TYPE_CHECKING:
@@ -80,7 +80,7 @@ class Drawing:
     window_panel = None
     panel: m_panel.FFDPanel = None
     imgui_draw_renderer: 'ffd_imgui.OpenglPynputRenderer' = None
-    imgui_panel_renderer: 'ffd_imgui.OpenglPynputRenderer' = None
+    imgui_panel_renderer: 'ffd_imgui.FFDGlfwRenderer' = None
 
     def __init__(self, main: "FFDraw"):
         self.main = main
@@ -93,8 +93,8 @@ class Drawing:
         self.timer = DrawTimeMgr()
         self.cfg = self.main.config.setdefault('gui', {})
         self.always_draw = self.cfg.setdefault('always_draw', False)
-        self.font_path = self.cfg.setdefault('font_path', r'C:\Windows\Fonts\msyh.ttc')
-        self.font_size = self.cfg.setdefault('font_size', 18)
+        self.font_path = self.cfg.setdefault('font_path', r'res\PingFang.ttf')
+        self.font_size = self.cfg.setdefault('font_size', default_style.stlye_font_size)
         self._label_counter = 0
 
         self.draw_work_queue = queue.Queue()
@@ -110,9 +110,13 @@ class Drawing:
         self.logger.debug('imgui is enabled')
         from . import ffd_imgui
         self.window_panel = window.init_window('panel_window', False, None, None)
-        self.imgui_panel_renderer = ffd_imgui.OpenglPynputRenderer(self.window_panel)
+        self.imgui_panel_renderer = ffd_imgui.FFDGlfwRenderer(self.window_panel)
         fonts = imgui.get_io().fonts
-        self.font = fonts.add_font_from_file_ttf(self.font_path, self.font_size, fonts.get_glyph_ranges_chinese_full())
+        try:
+            self.font = fonts.add_font_from_file_ttf(self.font_path, self.font_size, None, fonts.get_glyph_ranges_chinese_full())
+        except Exception as e:
+            self.logger.error('load font failed, chinese wont be shown:', exc_info=e)
+            self.font = None
         self.imgui_panel_renderer.refresh_font_texture()
         self.panel = m_panel.FFDPanel(self)
         self.window_draw = window.init_window('draw_window', True, self.window_panel, self.game_hwnd)
@@ -126,13 +130,22 @@ class Drawing:
 
     def _process_single_frame(self):
         self._label_counter = 0
+        if self.cfg.get('font_path') != self.font_path:
+            fonts = imgui.get_io().fonts
+            try:
+                self.font = fonts.add_font_from_file_ttf(self.font_path, self.font_size, None, fonts.get_glyph_ranges_chinese_full())
+            except Exception as e:
+                self.logger.error('load font failed, chinese wont be shown:', exc_info=e)
+                self.font = None
+            self.imgui_panel_renderer.refresh_font_texture()
+            self.font_path = self.cfg['font_path']
         glfw.poll_events()
 
         self.imgui_panel_renderer.process_inputs(glfw.get_window_attrib(self.window_panel, glfw.FOCUSED))
         imgui.new_frame()
-        imgui.push_font(self.font)
+        if self.font: imgui.push_font(self.font)
         self.panel.draw()
-        imgui.pop_font()
+        if self.font: imgui.pop_font()
         imgui.end_frame()
         imgui.render()
 
@@ -141,14 +154,13 @@ class Drawing:
         gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
         self.imgui_panel_renderer.render(imgui.get_draw_data())
 
-
         process_draw = self.always_draw or GetForegroundWindow() == self.game_hwnd
         self.imgui_draw_renderer.process_inputs(process_draw)
         self._view = view.View()
         self._view.projection_view, self._view.screen_size = self.main.mem.load_screen()
 
         imgui.new_frame()
-        imgui.push_font(self.font)
+        if self.font: imgui.push_font(self.font)
 
         gl.glClearColor(0, 0, 0, 0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
@@ -181,7 +193,7 @@ class Drawing:
             gl.glClearColor(0, 0, 0, 0)
             gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
-        imgui.pop_font()
+        if self.font: imgui.pop_font()
         imgui.end_frame()
         imgui.render()
         self.imgui_draw_renderer.render(imgui.get_draw_data())
@@ -209,6 +221,8 @@ class Drawing:
             glfw.terminate()
         except Exception as e:
             self.logger.error('error in main thread', exc_info=e)
+        finally:
+            os._exit(0)
 
     def get_view(self) -> view.View:
         if threading.get_ident() != self.work_thread:

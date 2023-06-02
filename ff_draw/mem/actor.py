@@ -2,8 +2,9 @@ import ctypes
 import struct
 import typing
 import glm
+from fpt4.utils.se_string import SeString
 from nylib.utils.win32 import memory as ny_mem
-from .utils import direct_mem_property
+from .utils import direct_mem_property, WinAPIError
 
 if typing.TYPE_CHECKING:
     from . import XivMem
@@ -26,8 +27,13 @@ class StatusManager:
 
     def __iter__(self):
         """id,param,remain,source_id"""
-        for i in range(30):
-            yield status_struct.unpack(ny_mem.read_bytes(self.handle, self.address + 8 + (i * status_struct.size), status_struct.size))
+        try:
+            for i in range(30):
+                yield status_struct.unpack(
+                    ny_mem.read_bytes(self.handle, self.address + 8 + (i * status_struct.size), status_struct.size)
+                )
+        except WinAPIError:
+            pass
 
     def _iter_filter(self, status_id: int, source_id=0):
         for status_id_, param, remain, source_id_ in self:
@@ -96,6 +102,16 @@ class ActorOffsets630(ActorOffsets):
     status = 0x1B60
 
 
+class ActorOffsets640(ActorOffsets630):
+    class_job = 0x1E2
+    level = 0x1E3
+    model_attr = 0x1E6
+    pc_target_id = 0xCB0
+    b_npc_target_id = 0x1AB8
+    shield = 0x1ED
+    status = 0x1B80
+
+
 class Actor:
     offsets = ActorOffsets
 
@@ -105,7 +121,14 @@ class Actor:
 
     @property
     def name(self):
-        return ny_mem.read_string(self.handle, self.address + self.offsets.name, 68)
+        data = ny_mem.read_bytes(self.handle, self.address + self.offsets.name, 68)
+        try:
+            data = data[:data.index(0)]
+        except ValueError:
+            pass
+        if 2 in data:
+            return str(SeString.from_buffer(bytearray(data)))
+        return data.decode('utf-8', 'ignore')
 
     id = direct_mem_property(ctypes.c_uint)
     base_id = direct_mem_property(ctypes.c_uint)
@@ -130,19 +153,36 @@ class Actor:
     model_attr = direct_mem_property(ctypes.c_byte)
     shield = direct_mem_property(ctypes.c_ubyte)
 
+    def target_radian(self, target: 'Actor'):
+        return glm.polar(target.pos - self.pos).y
+
+    def target_distance(self, target: 'Actor'):
+        return glm.distance(self.pos, target.pos)
+
     @property
     def target_id(self):
-        return ny_mem.read_uint(self.handle, self.address + (self.offsets.pc_target_id if self.actor_type == 1 else self.offsets.b_npc_target_id))
+        try:
+            return ny_mem.read_uint(self.handle, self.address + (
+                self.offsets.pc_target_id if self.actor_type == 1 else self.offsets.b_npc_target_id
+            ))
+        except WinAPIError:
+            return 0
 
     @property
     def can_select(self):
-        if ny_mem.read_byte(self.handle, self.address + self.offsets.status_flag) & 0b110 != 0b110: return False
-        return ny_mem.read_uint(self.handle, self.address + self.offsets.hide_flag) >> 11 == 0
+        try:
+            if ny_mem.read_byte(self.handle, self.address + self.offsets.status_flag) & 0b110 != 0b110: return False
+            return ny_mem.read_uint(self.handle, self.address + self.offsets.hide_flag) >> 11 == 0
+        except WinAPIError:
+            return False
 
     @property
     def is_visible(self):
-        p_draw_object = ny_mem.read_address(self.handle, self.address + self.offsets.draw_object)
-        return ny_mem.read_byte(self.handle, p_draw_object + 0x88) & 1
+        try:
+            p_draw_object = ny_mem.read_address(self.handle, self.address + self.offsets.draw_object)
+            return ny_mem.read_byte(self.handle, p_draw_object + 0x88) & 1 > 0
+        except WinAPIError:
+            return False
 
     @property
     def status(self):
@@ -156,13 +196,19 @@ class ActorTable:
         self.main = main
         self.handle = main.handle
         self.base_address = main.scanner.find_point('4c ? ? * * * * 89 ac cb')[0]
-        self.sorted_table_address = self.base_address + main.scanner.find_val('4e ? ? ? * * * * 41 ? ? ? 3b ? 73')[0]
+        self.sorted_table_address = self.base_address + main.scanner.find_val('4e ? ? ? * * * * 41 ? ? ? 3b ? 73 ? 44')[0]
         self.sorted_count_address = self.base_address + main.scanner.find_val('44 ? ? * * * * 45 ? ? 41 ? ? ? 48 ? ? 78')[0]
         self.me_ptr = main.scanner.find_point('48 ? ? * * * * 49 39 87')[0]
-        if main.game_version >= (6, 3, 0):
+
+        if main.game_version >= (6, 4, 0):
+            Actor.offsets = ActorOffsets640
+        elif main.game_version >= (6, 3, 0):
             Actor.offsets = ActorOffsets630
         else:
             Actor.offsets = ActorOffsets
+
+        self.table_size = main.scanner.find_val('81 bf ? ? ? ? * * * * 72 ? 44 89 b7')[0]
+        self.use_brute_search = False
 
     def __getitem__(self, item):  # by sorted idx
         if item < self.sorted_length:
@@ -194,7 +240,12 @@ class ActorTable:
             else:
                 break
 
-    def get_actor_by_id(self, actor_id):
+    def _get_actor_by_id_brute(self, actor_id):
+        for i in range(self.table_size):
+            if (a := self.get_actor_by_idx(i)) and a.id == actor_id:
+                return a
+
+    def _get_actor_by_id_bisect(self, actor_id):
         if is_invalid_id(actor_id):
             return None
         left = 0
@@ -204,12 +255,17 @@ class ActorTable:
                 # error occurred, maybe just game update
                 return
             aid = a.id
-            if aid < actor_id:
+            if not aid:
+                continue
+            elif aid < actor_id:
                 left = idx + 1
             elif aid > actor_id:
                 right = idx - 1
             else:
                 return a
+
+    def get_actor_by_id(self, actor_id) -> Actor | None:
+        return (self._get_actor_by_id_brute if self.use_brute_search else self._get_actor_by_id_bisect)(actor_id)
 
     @property
     def sorted_length(self):

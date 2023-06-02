@@ -4,6 +4,15 @@
 
 ## 运行
 
+### 小白懒人包版本
+
+- [下载](https://github.com/gogofishman/FFDraw/releases)
+- 适用人群：python环境我不会装啊，exe怎么报错啊，py文件怎么启动啊，怎么更新啊我去
+- 双击`run.bat`，会自动在当前文件夹安装FFD，同时搭建python环境，并启动FFD
+- 什么？你不会填网络代理端口？兄弟还是当绿玩吧，与科技无缘
+
+
+
 ### python 版本
 
 * 需求 `python3.10` 或以上的`x64版本`作为运行环境
@@ -673,6 +682,9 @@
 ## 预设
 * UCOB https://github.com/zfxsquare/FFD_trigger
 * 究极神兵绝境战 https://github.com/Hs096/FFD_trigger
+* TOP P4 https://github.com/gldenlii/FFD_Trigger/blob/main/TriggernometryExport.xml
 * p5s https://github.com/qingqingthe/FFD_trigger/blob/main/p5s_ffd.xml
 * p8s 门神 https://github.com/qingqingthe/FFD_trigger/blob/main/p8s_%E9%97%A8%E7%A5%9E_ffd.xml
 * p8s 本体 https://github.com/qingqingthe/FFD_trigger/blob/main/p8s_%E6%9C%AC%E4%BD%93_ffd.xml
+* PVP插件 https://github.com/extrant/FFDraw-PVPPlugins
+* 绝欧米茄绘制 P1  https://github.com/Errerer/FFDrawplugins 

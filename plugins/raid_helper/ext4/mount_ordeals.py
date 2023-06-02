@@ -9,7 +9,8 @@ from raid_helper.data import special_actions
 
 map_ex = raid_utils.MapTrigger(1096)
 center = glm.vec3(100, 0, 100)
-
+is_enable = map_ex.add_value(raid_utils.BoolCheckBox('default/enable', True))
+map_ex.decorators.append(lambda f: (lambda *args, **kwargs: f(*args, **kwargs) if is_enable.value else None))
 # special_actions[31983] = 0x50000 | 60  # 转转转扇形
 # 因为会手动提前绘制，所以禁用自动绘制
 special_actions[31983] = 0  # 转转转扇形
@@ -73,7 +74,6 @@ def on_channel_shattering_heat(msg: ActorControlMessage[actor_control.SetChannel
 
 
 @map_ex.on_add_status(3483)
-@raid_utils.new_thread
 def on_add_status_blooming_welt(msg: ActorControlMessage[actor_control.AddStatus]):
     # 12s
     # Blooming Welt
@@ -91,7 +91,6 @@ def on_add_status_blooming_welt(msg: ActorControlMessage[actor_control.AddStatus
 
 
 @map_ex.on_add_status(3484)
-@raid_utils.new_thread
 def on_add_status_furious_welt(msg: ActorControlMessage[actor_control.AddStatus]):
     # 12s
     # Furious Welt
@@ -104,7 +103,6 @@ def on_add_status_furious_welt(msg: ActorControlMessage[actor_control.AddStatus]
 
 
 @map_ex.on_add_status(3485)
-@raid_utils.new_thread
 def on_add_status_stinging_welt(msg: ActorControlMessage[actor_control.AddStatus]):
     # 15s
     # Stinging Welt
@@ -230,3 +228,5 @@ class FlamespireClaw:
 
 flamespire_claw = FlamespireClaw()
 hope_abandon_ye = HopeAbandonYe()
+
+map_ex.clear_decorators()

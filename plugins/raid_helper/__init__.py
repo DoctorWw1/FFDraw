@@ -1,8 +1,10 @@
+import itertools
+
 from ff_draw.func_parser import action_type_to_shape_default
 from ff_draw.plugins import FFDrawPlugin
 from ff_draw.sniffer.message_structs.zone_server import ActorCast
 from nylib.utils.win32 import memory as ny_mem
-from .data import special_actions
+from .data import special_actions, delay_until, omen_color
 from .utils import *
 
 
@@ -10,6 +12,8 @@ def set_raid_helper_instance(raid_helper: 'RaidHelper'):
     from . import utils
     from .utils import trigger
     utils.raid_helper = trigger.raid_helper = RaidHelper.instance = raid_helper
+    for t_val_cb in trigger.TValue._cache_need_init:
+        t_val_cb()
 
 
 def load_triggers():
@@ -31,6 +35,12 @@ class HookCall:
     def play(self, msg):
         for c in self.common: c(msg)
         for c in self.by_map.get(FFDraw.instance.mem.territory_info.territory_id, ()): c(msg)
+
+
+def delay_until_dec(action_id, shape):
+    if (delay_until_ := delay_until.get(action_id)) and delay_until_ > 0:
+        return lambda o: 0 if o.remaining_time > delay_until_ else shape
+    return shape
 
 
 class HookMap2:
@@ -58,8 +68,8 @@ class RaidHelper(FFDrawPlugin):
     instance: 'RaidHelper' = None
 
     def __init__(self, main):
-        set_raid_helper_instance(self)
         super().__init__(main)
+        set_raid_helper_instance(self)
         self.hook_map = HookMap2()
         self._init_hook_map()
         for h, c in self.hook_map.iter():
@@ -80,6 +90,8 @@ class RaidHelper(FFDrawPlugin):
         self.actor_omens = {}
         self.bnpc_battalion_offset = self.main.mem.scanner.find_val('44 ? ? ? * * * * 4c 89 68 ? 4c 89 70')[0]
         self.logger.debug(f'bnpc b offset {self.bnpc_battalion_offset:x}')
+
+        self._panel_filter_string = ''
 
     def _init_hook_map(self):
         load_triggers()
@@ -109,9 +121,18 @@ class RaidHelper(FFDrawPlugin):
                 self.simple_cast_cfg['print_history'] = self.print_history
                 self.storage.save()
             imgui.tree_pop()
-        common_trigger.render()
-        for tid, mt in sorted(MapTrigger.triggers.items()):
-            mt.render()
+        if self._panel_filter_string:
+            if imgui.button(' x '):
+                self._panel_filter_string = ''
+            imgui.same_line()
+        _, self._panel_filter_string = imgui.input_text('filter', self._panel_filter_string, 256)
+
+        for idx, tg in sorted(((tg.get_index(), tg) for tg in itertools.chain(MapTrigger.triggers.values(), [common_trigger]) if self._panel_filter_string in tg.label), reverse=True):
+            if idx > 0:
+                highlight = (.3, 1, .3, 1)
+            else:
+                highlight = None
+            tg.render(highlight)
 
     def current_triggers(self) -> typing.Iterable[TriggerGroup]:
         yield common_trigger
@@ -150,7 +171,15 @@ class RaidHelper(FFDrawPlugin):
         target = self.main.mem.actor_table.get_actor_by_id(data.target_id) if data.target_id != source_id else None
         effect_width = action.effect_width
         effect_range = action.effect_range
-        if self.is_enemy(self.main.mem.actor_table.me, source):
+        color = surface_color = line_color = None
+        if _color := omen_color.get(action_id):
+            _line_color = None
+            if isinstance(_color, tuple):
+                surface_color, *_line_color = _color
+            else:
+                surface_color = _color
+            line_color = _line_color[0] if _line_color else surface_color + glm.vec4(0, 0, 0, .5)
+        elif self.is_enemy(self.main.mem.actor_table.me, source):
             color = 'enemy'
         elif self.show_friend:
             color = 'friend'
@@ -158,7 +187,7 @@ class RaidHelper(FFDrawPlugin):
             return
         if data.display_delay:
             delay = data.display_delay / 10
-            alpha = lambda o: 1 if time.time() - o.start_at > delay else .3
+            alpha = lambda o: 1 if time.time() - o.start_at > delay else .7
         else:
             alpha = 1
         if effect_type == 8:  # rect to target
@@ -168,16 +197,18 @@ class RaidHelper(FFDrawPlugin):
             self.actor_omens[source_id] = BaseOmen(
                 main=self.main,
                 pos=lambda _: source.pos,
-                shape=0x20000,
+                shape=delay_until_dec(action_id, 0x20000),
                 scale=lambda _: glm.vec3(effect_width, 1, glm.distance(source.pos, target.pos)),
                 facing=lambda _: glm.polar(target.pos - source.pos).y,
+                surface_color=surface_color,
+                line_color=line_color,
                 surface_line_color=color,
                 duration=data.cast_time + .5,
                 alpha=alpha,
             )
         shape = special_actions[action_id] if action_id in special_actions else action_type_to_shape_default.get(effect_type)
         if not shape: return
-        scale = glm.vec3(effect_width if shape == 0x20000 else effect_range, 1, effect_range)
+        scale = glm.vec3(effect_width if shape >> 16 == 2 else effect_range, 1, effect_range)
         is_circle = shape >> 16 == 1
         pos = (lambda _: target.pos) if is_circle and target else data.pos
         facing = 0 if is_circle else (lambda _: glm.polar(target.pos - source.pos).y) if target else data.facing
@@ -186,15 +217,18 @@ class RaidHelper(FFDrawPlugin):
             self.logger.debug(
                 f'#simple_cast {source.name} cast {action.text}#{action_id} '
                 f'shape:{maybe_callable(shape):#X} time:{data.cast_time:.2f} '
-                f'pos:{maybe_callable(pos)} facing:{maybe_callable(facing)} scale:{scale}'
+                f'pos:{maybe_callable(pos)} facing:{maybe_callable(facing)} scale:{scale} '
+                f'color:{color} line_color:{line_color} surface_color:{surface_color}'
             )
         self.actor_omens[source_id] = BaseOmen(
             main=self.main,
             pos=pos,
-            shape=shape,
+            shape=delay_until_dec(action_id, shape),
             scale=scale,
             facing=facing,
             surface_line_color=color,
+            surface_color=surface_color,
+            line_color=line_color,
             duration=data.cast_time + .3,
             alpha=alpha,
         )

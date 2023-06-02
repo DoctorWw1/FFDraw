@@ -15,7 +15,7 @@ def main():
     multiprocessing.freeze_support()
     try:
         from ff_draw.main import FFDraw
-        install()
+        install(file_name='AppData/log/ff_draw.log', archive_zip='AppData/log/archive_log.zip')
         logging.debug(f'current Pid:%s')
         if not is_admin():
             runas()
@@ -25,6 +25,9 @@ def main():
         instance.start_sniffer()
         instance.start_gui_thread()
         instance.start_http_server()
+    except StopIteration:
+        logging.warning('我们要不先开个游戏？')
+        os.system('pause')
     except Exception as e:
         logging.critical('critical error occurred', exc_info=e)
         os.system('pause')

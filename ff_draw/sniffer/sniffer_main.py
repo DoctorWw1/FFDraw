@@ -2,9 +2,15 @@ import logging
 import multiprocessing
 import os
 import pathlib
+import queue
+import sys
 import threading
 import time
+import traceback
 import typing
+
+import imgui
+
 from nylib.utils import serialize_data, KeyRoute, BroadcastHook
 from nylib.utils.win32.network import find_process_tcp_connections
 from . import enums, extra, message_dump, hook_sniff
@@ -40,12 +46,30 @@ class Sniffer:
         self.sniff_promisc = self.config.setdefault('sniff_promisc', True)
         self.dump_pkt = self.config.setdefault('dump_pkt', False)
         self.dump_zone_down_only = self.config.setdefault('dump_zone_down_only', True)
+        self.auto_update = self.config.setdefault('auto_update', True)
+        self.auto_update_host = self.config.setdefault('auto_update_host', r'https://ffxiv-opcodes.nyao.xyz/')
 
         pno_dir = pathlib.Path(os.environ['ExcPath']) / 'res' / 'proto_no'
+        if self.auto_update:
+            for f_name in ('ChatServerIpc.csv', 'ChatClientIpc.csv', 'ZoneServerIpc.csv', 'ZoneClientIpc.csv'):
+                try:
+                    (res := self.main.requests.get(self.auto_update_host + f_name)).raise_for_status()
+                    assert res.headers.get('content-type', '').startswith('text/csv'), 'Invalid content type'
+                except Exception as e:
+                    self.logger.warning(f'Failed to update {f_name}, {e}')
+                else:
+                    with open(pno_dir / f_name, 'wb') as f:
+                        f.write(res.content)
+                    self.logger.info(f'Updated {f_name}')
+
         self._chat_server_pno_map = simple.load_pno_map(pno_dir / 'ChatServerIpc.csv', self.main.mem.game_build_date, enums.ChatServer)
         self._chat_client_pno_map = simple.load_pno_map(pno_dir / 'ChatClientIpc.csv', self.main.mem.game_build_date, enums.ChatClient)
         self._zone_server_pno_map = simple.load_pno_map(pno_dir / 'ZoneServerIpc.csv', self.main.mem.game_build_date, enums.ZoneServer)
         self._zone_client_pno_map = simple.load_pno_map(pno_dir / 'ZoneClientIpc.csv', self.main.mem.game_build_date, enums.ZoneClient)
+        self._chat_server_pno_map_size = len(self._chat_server_pno_map)
+        self._chat_client_pno_map_size = len(self._chat_client_pno_map)
+        self._zone_server_pno_map_size = len(self._zone_server_pno_map)
+        self._zone_client_pno_map_size = len(self._zone_client_pno_map)
 
         self.on_chat_server_message = KeyRoute(lambda m: m.proto_no)
         self.on_chat_client_message = KeyRoute(lambda m: m.proto_no)
@@ -62,6 +86,11 @@ class Sniffer:
         self.extra = extra.SnifferExtra(self)
 
         self.update_dump()
+        self.msg_queue = queue.Queue()
+        self._msg_queue = queue.Queue()
+        self._msg_evt = threading.Event()
+        self.msg_loop_thread = threading.Thread(target=self.msg_loop, daemon=True)
+        self.msg_loop_watcher_thread = threading.Thread(target=self.msg_loop_watcher, daemon=True)
 
     def update_dump(self):
         if self.dump:
@@ -72,8 +101,29 @@ class Sniffer:
             self.dump = message_dump.MessageDumper(file_name, self.main.mem.game_build_date)
             self.logger.info(f'dump packets at {file_name}')
 
+    def msg_loop_watcher(self):
+        while True:
+            is_zone, is_up, msg = self.msg_queue.get()
+            self._msg_evt.clear()
+            start_time = time.time()
+            self._msg_queue.put((is_zone, is_up, msg))
+            self._msg_evt.wait(.1)
+            while not self._msg_evt.is_set():
+                try:
+                    self.logger.warning(f'parse ipc {is_zone=} {is_up=} {msg.element.proto_no=} run for {time.time() - start_time:.3f}s, for blocking event, please use async method\n' + ''.join(
+                        traceback.format_stack(sys._current_frames()[self.msg_loop_thread.ident])[10:]
+                    ))
+                except Exception as e:
+                    self.logger.warning(f'exception when get overtime stack', exc_info=e)
+                self._msg_evt.wait(.5)
 
-    def _on_ipc_message(self, is_zone, is_up, msg: message.ElementMessage[structs.IpcHeader]):
+    def msg_loop(self):
+        msg: message.ElementMessage[structs.IpcHeader]
+        while True:
+            self._on_ipc_message(*self._msg_queue.get())
+            self._msg_evt.set()
+
+    def _on_ipc_message(self, is_zone, is_up, msg):
         fix_value = None
         if self.dump and ((not self.dump_zone_down_only) or (is_zone and not is_up)):
             self.dump.write(msg.bundle_header.timestamp_ms, is_zone, is_up, msg.element.proto_no, msg.el_header.source_id, msg.raw_data[16:], fix_value := self.packet_fix.value)
@@ -115,5 +165,41 @@ class Sniffer:
             except Exception as e:
                 self.logger.error(f'error in processing network message {pno}', exc_info=e)
 
+    def on_ipc_message(self, is_zone, is_up, msg: message.ElementMessage[structs.IpcHeader]):
+        self.msg_queue.put((is_zone, is_up, msg))
+
     def start(self):
+        self.msg_loop_thread.start()
+        self.msg_loop_watcher_thread.start()
         hook_sniff.install()
+
+    def render_panel(self):
+        imgui.text(f'fix:{self.packet_fix.value}')
+        imgui.text(f'load pno: chat_server[{self._chat_server_pno_map_size}] chat_client[{self._chat_client_pno_map_size}] zone_server[{self._zone_server_pno_map_size}] zone_client[{self._zone_client_pno_map_size}]')
+        clicked, self.print_packets = imgui.checkbox("print_packets", self.print_packets)
+        if clicked:
+            self.config['print_packets'] = self.print_packets
+            self.main.save_config()
+        clicked, self.print_actor_control = imgui.checkbox("print_actor_control", self.print_actor_control)
+        if clicked:
+            self.config['print_packets'] = self.print_packets
+            self.main.save_config()
+        clicked, self.dump_pkt = imgui.checkbox("dump_pkt", self.dump_pkt)
+        if clicked:
+            self.config['dump_pkt'] = self.dump_pkt
+            self.update_dump()
+            self.main.save_config()
+        if self.dump_pkt:
+            clicked, self.dump_zone_down_only = imgui.checkbox("dump_zone_down_only", self.dump_zone_down_only)
+            if clicked:
+                self.config['dump_zone_down_only'] = self.dump_zone_down_only
+                self.main.save_config()
+        clicked, self.auto_update = imgui.checkbox("auto_update", self.auto_update)
+        if clicked:
+            self.config['auto_update'] = self.auto_update
+            self.main.save_config()
+        if self.auto_update:
+            is_update, self.auto_update_host = imgui.input_text('auto_update_host', self.auto_update_host, 256)
+            if is_update:
+                self.config['auto_update_host'] = self.auto_update_host
+                self.main.save_config()
