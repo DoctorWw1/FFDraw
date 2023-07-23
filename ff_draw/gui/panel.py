@@ -7,7 +7,6 @@ import urllib.parse
 import glfw
 import glm
 import imgui
-import requests
 from . import proxy_test
 from .default_style import set_style, pop_style, text_tip, set_default_color, set_color
 from .i18n import *
@@ -23,8 +22,6 @@ class FFDPanel:
 
     def __init__(self, gui: 'Drawing'):
         self.main = gui.main
-        self.renderer = gui.imgui_panel_renderer
-        self.window = gui.window_panel
         self.is_expand = True
         self.is_show = True
         self.current_page = ''
@@ -47,6 +44,9 @@ class FFDPanel:
         self.style_color = set_default_color(self.main.config.setdefault('style_color', {}))
         self.font_size = self.main.config['gui']['font_size']
         imgui.get_style().alpha = self.style_color['alpha']
+
+    def on_want_close(self, w):
+        glfw.iconify_window(w.window)
 
     def ffd_page(self):
         with imgui.begin_tab_bar("tabBar") as tab_bar:
@@ -273,6 +273,10 @@ class FFDPanel:
             if clicked:
                 gui.cfg['always_draw'] = gui.always_draw
                 self.main.save_config()
+            if gui.window_manager.draw_window:
+                w = gui.window_manager.draw_window.window
+                clicked, new_val = imgui.checkbox(i18n(Window_Float), glfw.get_window_attrib(w, glfw.FLOATING))
+                if clicked: glfw.set_window_attrib(w, glfw.FLOATING, glfw.TRUE if new_val else glfw.FALSE)
 
         if imgui.collapsing_header(i18n(Sniffer) + '###tab_setting_div_sniffer', None, flag)[0]:
             self.main.sniffer.render_panel()
@@ -284,26 +288,32 @@ class FFDPanel:
                 parser.compile_config.setdefault('print_debug', {})['enable'] = parser.print_compile
                 self.main.save_config()
 
-    def draw(self):
-        if not self.is_show:
-            glfw.iconify_window(self.window)
-            self.is_show = True
-            return
-        if glfw.get_window_attrib(self.window, glfw.ICONIFIED):
-            return
-        window_flag = 0
-        if not self.is_expand: window_flag |= imgui.WINDOW_NO_MOVE
-        set_style(self.style_color)  # 设置gui风格
-        imgui.set_next_window_size(1280, 720, imgui.FIRST_USE_EVER)
-        self.is_expand, self.is_show = imgui.begin('FFDraw', True, window_flag)
-        glfw.set_window_size(self.window, *map(int, imgui.get_window_size()))
-        if not self.is_expand:
-            pop_style()
-            return imgui.end()
-        win_pos = glm.vec2(*imgui.get_window_position())
-        if any(win_pos):
-            glfw.set_window_pos(self.window, *map(int, glm.vec2(*glfw.get_window_pos(self.window)) + win_pos))
-        imgui.set_window_position(0, 0)
+    def push_style(self, _):
+        return set_style(self.style_color)
+
+    def pop_style(self, _):
+        return pop_style()
+
+    def draw(self, _):
+        # if not self.is_show:
+        #     glfw.iconify_window(self.window)
+        #     self.is_show = True
+        #     return
+        # if glfw.get_window_attrib(self.window, glfw.ICONIFIED):
+        #     return
+        # window_flag = 0
+        # if not self.is_expand: window_flag |= imgui.WINDOW_NO_MOVE
+        # set_style(self.style_color)  # 设置gui风格
+        # imgui.set_next_window_size(1280, 720, imgui.FIRST_USE_EVER)
+        # self.is_expand, self.is_show = imgui.begin('FFDraw', True, window_flag)
+        # glfw.set_window_size(self.window, *map(int, imgui.get_window_size()))
+        # if not self.is_expand:
+        #     pop_style()
+        #     return imgui.end()
+        # win_pos = glm.vec2(*imgui.get_window_position())
+        # if any(win_pos):
+        #     glfw.set_window_pos(self.window, *map(int, glm.vec2(*glfw.get_window_pos(self.window)) + win_pos))
+        # imgui.set_window_position(0, 0)
 
         # panel窗口绘制
         imgui.set_cursor_pos_y(50)
@@ -332,9 +342,9 @@ class FFDPanel:
                 imgui.pop_style_color(3)
 
                 imgui.same_line()
-                imgui.push_style_color(imgui.COLOR_BUTTON, *self.style_color['color_background'])
-                imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, *self.style_color['color_background'])
-                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, *self.style_color['color_background'])
+                imgui.push_style_color(imgui.COLOR_BUTTON, 0, 0, 0, 0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0, 0, 0, 0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0, 0, 0, 0)
                 imgui.push_style_color(imgui.COLOR_TEXT, *self.style_color['color_main_up_up'])
                 if imgui.button(button_name, button_w - 30, button_h):
                     self.current_page = name
@@ -363,5 +373,5 @@ class FFDPanel:
             self.logger.error('error in tab drawing', exc_info=e)
         imgui.end_child()
 
-        imgui.end()
-        pop_style()
+        # imgui.end()
+        # pop_style()

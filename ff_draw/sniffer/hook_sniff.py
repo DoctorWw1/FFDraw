@@ -5,6 +5,8 @@ def hook_sniff(cb):
     import ctypes
     import struct
     import traceback
+    import logging
+    logger = logging.getLogger('hook_sniff')
     mv_from_mem = ctypes.pythonapi.PyMemoryView_FromMemory
     mv_from_mem.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_int)
     mv_from_mem.restype = ctypes.py_object
@@ -61,6 +63,7 @@ def hook_sniff(cb):
     chat_send = create_hook(chat_send_addr, ctypes.c_char, [ctypes.c_int64, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_char])(on_send(False)).install_and_enable()
     zone_send = create_hook(zone_send_addr, ctypes.c_char, [ctypes.c_int64, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_char])(on_send(True)).install_and_enable()
     replay_recv = create_hook(replay_recv_addr, ctypes.c_int64, [ctypes.c_int64])(replay_recv).install_and_enable()
+    logger.info('hook_sniff installed')
     return chat_recv, zone_recv, chat_send, zone_send, replay_recv
 
 
@@ -80,20 +83,12 @@ res = try_hook()
 
 
 def install():
-    import os
-    import sys
     import time
 
     from ff_draw.main import FFDraw
     from ff_draw.sniffer.utils import message
-    from nylib.utils.win32.inject_rpc import Handle, pywin32_dll_place
 
     main = FFDraw.instance
-
-    pywin32_dll_place()
-    handle = Handle(main.mem.pid, main.mem.handle)
-    if getattr(sys, 'frozen', False):
-        handle.add_path(os.path.join(os.environ['ExcPath'], 'res', 'lib.zip'))
 
     chat_recv_addr, = main.mem.scanner.find_point("e8 * * * * 84 ? 74 ? 66 66 0f 1f 84 00")
     zone_recv_addr, = main.mem.scanner.find_point("48 ? ? ? ? 4c 89 6c 24 ? 4c 89 6c 24 ? e8 * * * * 84")
@@ -112,9 +107,8 @@ def install():
             raw_data=empty_ipc + data,
         ))
 
-    handle.wait_inject()
-    handle.client.subscribe('hook_sniff', callback)
-    install_cnt = handle.run(f'''
+    main.mem.inject_handle.client.subscribe('hook_sniff', callback)
+    install_cnt = main.mem.inject_handle.run(f'''
 chat_recv_addr = {chat_recv_addr} 
 zone_recv_addr = {zone_recv_addr}   
 chat_send_addr = {chat_send_addr}   

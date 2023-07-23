@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import sys
 import typing
 
 import glfw
@@ -10,7 +11,11 @@ import imgui
 from nylib.utils.win32 import memory as ny_mem, process as ny_proc
 from nylib.pefile import PE
 from nylib.pattern import StaticPatternSearcher
+from nylib.utils.win32.inject_rpc import Handle, pywin32_dll_place
+from nylib.utils.imgui import ctx as imgui_ctx
 from . import utils, actor, party, network_target, packet_fix, marking, territory_info, event_module, quest_info, storage
+from . import move_controller
+from . import hook_main_update, do_text_command, utf8string, hook_chatlog
 
 if typing.TYPE_CHECKING:
     from ff_draw.main import FFDraw
@@ -60,42 +65,22 @@ class XivMemPanel:
         else:
             imgui.text(f'me: N/A')
 
-        if imgui.tree_node('EventModule'):
-            if imgui.tree_node('ContentInfo'):
-                try:
-                    cinfo = mem.event_module.content_info
-                    imgui.text(f'handler_id: {cinfo.handler_id:#X}')
-                    imgui.text(f'content_id: {cinfo.content_id:#X}')
-                    imgui.text(f'title: {cinfo.title}')
-                    imgui.text(f'text1: {cinfo.text1}')
-                    imgui.text(f'text2: {cinfo.text2}')
-                    imgui.text('todo_list')
-                    if imgui.tree_node('Todo List'):
-                        try:
-                            for todo in cinfo.todo_list:
-                                if not todo.is_valid: break
-                                imgui.text(f'[{todo.is_finished}]{todo.desc}')
-                        except Exception as e:
-                            imgui.text('N/A - ' + str(e))
-                        imgui.tree_pop()
-                except Exception as e:
-                    imgui.text('N/A - ' + str(e))
-                imgui.tree_pop()
-            imgui.tree_pop()
-        if imgui.tree_node(f'QuestInfo'):
-            quest_sheet = self.main.sq_pack.sheets.quest_sheet
-            try:
-                for quest in mem.quest_info.quests():
-                    try:
-                        quest_data = quest_sheet[quest.id | 0x10000]
-                    except KeyError:
-                        imgui.text(f'N/A#{quest.id}[{quest.seq}]')
-                    else:
-                        imgui.text(f'{quest_data.text}#{quest.id}[{quest.seq}]')
-            except Exception as e:
-                imgui.text('N/A - ' + str(e))
+        with imgui_ctx.TreeNode('Debug') as n, n:
+            with imgui_ctx.TreeNode('Party') as n, n:
+                mem.party.render_debug()
+            with imgui_ctx.TreeNode('MarkingController') as n, n:
+                mem.marking.render_debug()
+            with imgui_ctx.TreeNode('TerritoryInfo') as n, n:
+                mem.territory_info.render_debug()
+            with imgui_ctx.TreeNode('EventModule') as n, n:
+                mem.event_module.render_debug()
+            with imgui_ctx.TreeNode('QuestInfo') as n, n:
+                mem.quest_info.render_debug()
+            with imgui_ctx.TreeNode('Storage') as n, n:
+                mem.storage.render_debug()
+            with imgui_ctx.TreeNode('MoveController') as n, n:
+                mem.move_controller.render_debug()
 
-            imgui.tree_pop()
         if not self.is_dev:
             io = imgui.get_io()
             if io.key_ctrl and io.key_shift and io.key_alt and io.keys_down[glfw.KEY_D]:
@@ -153,7 +138,11 @@ class CachedSigScanner(StaticPatternSearcher):
 
 
 class XivMem:
+    instance: 'XivMem' = None
+
     def __init__(self, main: 'FFDraw', pid: int):
+        assert XivMem.instance is None
+        XivMem.instance = self
         self.main = main
         self.pid = pid
         self.handle = ny_proc.open_process(pid)
@@ -161,7 +150,11 @@ class XivMem:
         file_name = self.base_module.filename.decode(self.main.path_encoding)
         self.hwnd = utils.get_hwnd(self.pid)
         self.game_version, self.game_build_date = utils.get_game_version_info(file_name)
+        os.environ['FFXIV_GAME_VERSION'] = '.'.join(map(str, self.game_version))
+        os.environ['FFXIV_GAME_BUILD_DATE'] = self.game_build_date
         self.scanner = CachedSigScanner(self, PE(file_name, fast_load=True), self.base_module.lpBaseOfDll)
+        ny_mem.write_ubyte(self.handle, self.scanner.find_address('74 ? 83 E8 ? 89 83 ? ? ? ?'), 0xeb)
+
         self.screen_address = self.scanner.find_point('48 ? ? * * * * e8 ? ? ? ? 42 ? ? ? 39 05')[0] + 0x1b4
         self.replay_flag_address = self.scanner.find_point('84 1d * * * * 74 ? 80 3d')[0]
         self._a_p_framework = self.scanner.find_point('48 ? ? * * * * 41 39 b1')[0]
@@ -174,7 +167,24 @@ class XivMem:
         self.event_module = event_module.EventModule(self)
         self.quest_info = quest_info.QuestInfo(self)
         self.storage = storage.StorageManager(self)
+        self.move_controller = move_controller.MoveController(self)
+
         self.panel = XivMemPanel(self)
+        utf8string.Utf8String.init_cls(self)
+
+        pywin32_dll_place()
+        self.inject_handle = Handle(self.pid, self.handle)
+        if getattr(sys, 'frozen', False):
+            self.inject_handle.add_path(os.path.join(os.environ['ExcPath'], 'res', 'lib.zip'))
+        self.inject_handle.wait_inject()
+        self.inject_handle.reg_std_out(lambda _, s: print(s, end=''))
+        self.inject_handle.reg_std_err(lambda _, s: print(s, end=''))
+        self.add_game_main_func, self.remove_game_main_func, self.call_once_game_main = hook_main_update.install(self)
+        self.do_text_command = do_text_command.DoTextCommand(self)
+        self.on_print_chat_log = hook_chatlog.OnPrintChatLog(self)
+
+    def call_native_once_game_main(self, func_ptr, res_type, arg_types, args):
+        return self.call_once_game_main(f'from ctypes import *\nres=CFUNCTYPE({res_type},{",".join(arg_types)})({func_ptr})({",".join(repr(a) for a in args)})')
 
     def load_screen(self):
         buf = ny_mem.read_bytes(self.handle, self.screen_address, 0x48)

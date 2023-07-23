@@ -1,5 +1,8 @@
 import functools
+import inspect
+import logging
 import threading
+import time
 import typing
 
 import glm
@@ -57,7 +60,6 @@ class TValue:
         raid_helper.storage.save()
         self._cache_value = self.default_value
         for f in self.on_change: f(self.default_value)
-
 
     def do_render(self):
         imgui.text(self.label + ': ')
@@ -176,6 +178,16 @@ class Select(TValue):
         imgui.pop_id()
 
 
+class ClickButton(TValue):
+    def __init__(self, label, func):
+        super(ClickButton, self).__init__(label + ':click', label.rsplit('/', 1)[-1], None)
+        self.func = new_thread(func)
+
+    def do_render(self):
+        if imgui.button(self.label):
+            self.func()
+
+
 pair_all = (None,)
 
 
@@ -214,6 +226,7 @@ class TriggerGroup:
         self._on_cast_map = {}
         self._on_effect_map = {}
         self._on_add_status = {}
+        self._on_add_status_by_action = {}
         self._on_set_channel = {}
         self._on_cancel_channel = {}
         self._on_npc_spawn = {}
@@ -321,6 +334,16 @@ class TriggerGroup:
         return self._add_set(self._on_add_status, status_id or pair_all)
 
     # endregion
+    # region on_add_status
+    def _recv_on_add_status_by_action(self, msg: AddStatusByActionMessage):
+        for c in self._on_add_status_by_action.get(msg.status_id, ()): call_safe(c, msg)
+        for c in self._on_add_status_by_action.get(None, ()):  call_safe(c, msg)  # pair all
+
+    def on_add_status_by_action(self, *status_id):
+        self.hook_map.set(main.sniffer.on_add_status_by_action, self._recv_on_add_status_by_action)
+        return self._add_set(self._on_add_status_by_action, status_id or pair_all)
+
+    # endregion
     # region on_npc_spawn
     def _recv_on_npc_spawn(self, msg: NetworkMessage[zone_server.NpcSpawn | zone_server.NpcSpawn2]):
         for c in self._on_npc_spawn.get(msg.message.create_common.npc_id, ()): call_safe(c, msg)
@@ -404,11 +427,17 @@ class TriggerGroup:
         return func
 
     # endregion
+    # region on_reset
+    def _recv_on_reset(self, msg: ActorControlMessage[actor_control.EventDirector]):
+        for c in self._on_reset: call_safe(c, msg)
+
     def on_reset(self, func):
         for _d in self._decorators.get(threading.get_ident(), []): func = _d(func)
+        self.hook_map.set(main.sniffer.on_reset, self._recv_on_reset)
         self._on_reset.append(func)
         return func
 
+    # endregion
     def on_hook(self, *hooks: BroadcastHook):
         def dec(func):
             for hook in hooks:
@@ -418,10 +447,17 @@ class TriggerGroup:
         return dec
 
 
+_warn_logger = logging.getLogger("raidhelper/trigger")
+
+
 class MapTrigger(TriggerGroup):
     triggers: 'dict[int,MapTrigger]' = {}
 
     def __init__(self, territory_id: int):
+        stack = inspect.stack()[1]
+        if not (stack.function == "get" and stack.frame.f_locals.get("cls") is self.__class__ and stack.frame.f_globals is globals()):
+            call_from = f"{stack.filename}:{stack.lineno}"
+            _warn_logger.warning(f"MapTrigger({territory_id}) called from {call_from}, use MapTrigger.get({territory_id}) instead")
         assert territory_id not in MapTrigger.triggers
         MapTrigger.triggers[territory_id] = self
         self.territory_id = territory_id
@@ -458,3 +494,39 @@ def new_thread(f):
 def tts(msg):
     if tts_plugin := main.plugins.get("tts/TTS"):
         tts_plugin.speak(msg)
+
+
+def game_output(msg, echo=False, use_tts=False):
+    if echo or main.mem.party.party_list.party_size < 2:
+        cmd = '/e '
+    else:
+        cmd = '/p '
+    main.mem.do_text_command(cmd + msg)
+    if use_tts:
+        if not isinstance(use_tts, str): use_tts = msg
+        tts(use_tts)
+
+
+class set_head_mark:
+    missions = {}
+
+    def __init__(self, mark_type: int | HeadMarkType, target_id, cancel_after: float = 0.0):
+        if isinstance(mark_type, HeadMarkType): mark_type = mark_type.value
+        self.mark_type = mark_type
+        self.target_id = target_id
+        self.cancel_after = cancel_after
+        main.mem.marking.request_head_mark(mark_type, target_id)
+        self.missions[mark_type] = self
+        if cancel_after: new_thread(self._delay_check)()
+
+    def _delay_check(self):
+        time.sleep(self.cancel_after)
+        if self.missions.get(self.mark_type) is self:
+            self.cancel()
+
+    def cancel(self):
+        marking = main.mem.marking
+        if marking.head_mark_target(self.mark_type) == self.target_id:
+            marking.request_head_mark(self.mark_type, self.target_id)
+        if self.missions.get(self.mark_type) is self:
+            self.missions.pop(self.mark_type, None)

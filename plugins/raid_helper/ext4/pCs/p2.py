@@ -1,6 +1,7 @@
 import math
 import threading
 
+import raid_helper
 from .utils import *
 
 special_actions[33613] = 0
@@ -166,7 +167,7 @@ class TheClassicalConcepts:
                 self.omens.append(raid_utils.draw_line(
                     source=glm.vec3(el_x * 8 + 88, 1, el_y * 8 + 84),
                     target=glm.vec3(water_x * 8 + 88, 1, water_y * 8 + 84),
-                    color=glm.vec4(.3, .3, .7, 1),
+                    color=color,
                     width=5,
                     duration=dur,
                 ))
@@ -245,9 +246,14 @@ def on_tether_ekpyrosis(evt: 'ActorControlMessage[actor_control.SetChanneling]')
     raid_utils.draw_rect(
         width=6, length=20,
         pos=source_actor,
-        facing=lambda _: target_actor.target_radian(source_actor),
+        facing=lambda _: source_actor.target_radian(target_actor),
         duration=8,
     )
+
+
+@pCs.on_set_channel(84)
+def on_channel_factor_in(evt: 'ActorControlMessage[actor_control.SetChanneling]'):
+    raid_utils.timeout_when_channeling_change(raid_helper.draw_circle(radius=20, pos=raid_utils.NActor.by_id(evt.param.target_id), duration=10), evt)
 
 
 the_classical_concepts = TheClassicalConcepts()
